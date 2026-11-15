@@ -1,11 +1,13 @@
 // attractor-render: offline harness for tuning cameras/looks, making videos and benchmarking.
 //
 //   attractor-render --attractor lorenz[,thomas|all] --out out.png
-//       [--size 1600x1000] [--particles N] [--palette dusk] [--seconds 4]
+//       [--size 1600x1000] [--particles 49152] [--palette ember] [--seconds 3]
 //       [--grow]                  start from a cloud (as the screensaver does) instead of settled
 //       [--yaw 30 --pitch 10]     fixed camera      [--sheet yaw|pitch]  contact sheet of angles
 //       [--zoom Z] [--decay D] [--head PX] [--bright B] [--bloom S] [--accumscale S] [--nolabel]
-//       [--video out.mp4 --skip S --crf 20]   record --seconds of video after skipping S seconds
+//       [--video out.mp4 --skip S --crf 18]   record --seconds of video after skipping S seconds
+//                                             (needs ffmpeg on PATH)
+//   attractor-render --help
 //       [--bench | --throughput]  GPU timing (per frame / at saturated clocks)
 //       [--nodraw] [--nosim]      profiling: skip trail drawing / simulation
 import CoreGraphics
@@ -13,6 +15,20 @@ import Foundation
 import ImageIO
 import Metal
 import UniformTypeIdentifiers
+
+if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
+    print("""
+    attractor-render --attractor NAME[,NAME|all] --out out.png [options]
+      --size WxH  --particles N  --palette NAME  --seconds S  --grow
+      --yaw DEG --pitch DEG  --sheet yaw|pitch  --zoom Z  --decay D  --head PX  --bright B
+      --bloom S  --accumscale S  --nolabel
+      --video out.mp4 [--skip S] [--crf N]   (needs ffmpeg on PATH)
+      --bench | --throughput   [--nodraw] [--nosim]
+    Attractors: \(Attractors.all.map(\.name).joined(separator: ", "))
+    Palettes:   \(Palette.all.map(\.name).joined(separator: ", "))
+    """)
+    exit(0)
+}
 
 var args = [String: String]()
 var flags = Set<String>()
@@ -31,7 +47,10 @@ guard size.count == 2, size[0] > 0, size[1] > 0 else { print("--size must look l
 let (W, H) = (size[0], size[1])
 let particleCount = Int(args["particles"] ?? "") ?? 49_152
 let paletteName = args["palette"] ?? "ember"
-let palette = Palette.all.first { $0.name.lowercased() == paletteName.lowercased() } ?? Palette.all[0]
+guard let palette = Palette.all.first(where: { $0.name.lowercased() == paletteName.lowercased() }) else {
+    print("unknown palette \(paletteName); choose from: \(Palette.all.map(\.name).joined(separator: ", "))")
+    exit(1)
+}
 let seconds = Float(args["seconds"] ?? "") ?? 3
 
 func writePNG(_ tex: MTLTexture, _ path: String) {
@@ -118,6 +137,7 @@ for name in names {
         var big = [UInt8](repeating: 0, count: W * H * 4)
         for (i, v) in values.enumerated() {
             r.cameraOverride = sheet == "yaw" ? (v, fixed) : (fixed, v)
+            r.clearTrails()   // no ghosting from the previous cell's angle
             render(r, target: cell, frames: 40, label: false)
             var bytes = [UInt8](repeating: 0, count: cw * ch * 4)
             cell.getBytes(&bytes, bytesPerRow: cw * 4, from: MTLRegionMake2D(0, 0, cw, ch), mipmapLevel: 0)
@@ -146,7 +166,8 @@ for name in names {
         let aspect = Float(W) / Float(H)
         r.resize(width: W, height: H)
         r.calibrateIfNeeded(aspect: aspect)
-        if let (tex, lw, lh) = LabelMaker.make(device: device, attractor: r.attractor, screenHeight: H,
+        if !flags.contains("nolabel"),
+           let (tex, lw, lh) = LabelMaker.make(device: device, attractor: r.attractor, screenHeight: H,
                                                accent: r.palette.stops[3]) {
             r.labelTexture = tex
             r.labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: W, screenH: H)
@@ -155,6 +176,11 @@ for name in names {
             let cb = r.queue.makeCommandBuffer()!
             r.encodeSimulation(cb, dt: 1 / 60, aspect: aspect)
             cb.commit()
+        }
+        let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":")
+        guard pathDirs.contains(where: { FileManager.default.isExecutableFile(atPath: "\($0)/ffmpeg") }) else {
+            print("--video needs ffmpeg on your PATH (e.g. brew install ffmpeg)")
+            exit(1)
         }
         let ffmpeg = Process()
         ffmpeg.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -180,7 +206,10 @@ for name in names {
             cb.commit()
             cb.waitUntilCompleted()
             target.getBytes(&bytes, bytesPerRow: W * 4, from: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0)
-            pipe.fileHandleForWriting.write(Data(bytes))
+            do { try pipe.fileHandleForWriting.write(contentsOf: Data(bytes)) } catch {
+                print("ffmpeg stopped accepting frames: \(error)")
+                exit(1)
+            }
         }
         try pipe.fileHandleForWriting.close()
         ffmpeg.waitUntilExit()

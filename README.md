@@ -5,7 +5,7 @@ chaotic flows, simulated and drawn entirely on the GPU with Metal.
 
 <p align="center">
   <a href="docs/demo.mp4"><img src="docs/demo-poster.jpg" width="100%" alt="Demo video: the Arneodo attractor condensing out of a cloud of particles"></a>
-  <br><sub><a href="docs/demo.mp4">▶ Watch the demo</a>: the Arneodo attractor condensing out of a cloud of particles (20 s)</sub>
+  <br><sub><a href="docs/demo.mp4">▶ Watch the demo</a> (MP4, 8 MB): the Arneodo attractor condensing out of a cloud of particles</sub>
 </p>
 
 <p>
@@ -35,16 +35,30 @@ cd attractor-saver
 
 Then pick **Attractor** in System Settings → Screen Saver.
 
-To just watch it in a window, open `build/Attractor Viewer.app`:
+`./build.sh install` copies the screensaver to `~/Library/Screen Savers` and restarts macOS's
+screensaver host so the new build is picked up. That closes a running screensaver or an open
+preview. Plain `./build.sh` only builds into `build/`.
+
+To uninstall, delete `~/Library/Screen Savers/Attractor.saver`.
+
+The bundle is ad-hoc signed, which is fine for a build made on your own Mac. If you copy a built
+`.saver` from elsewhere and macOS blocks it, clear the quarantine flag with
+`xattr -dr com.apple.quarantine Attractor.saver`.
+
+### Viewer
+
+To just watch it in a window, run `open "build/Attractor Viewer.app"`. The window title shows the
+current attractor and the shortcuts:
 
 | Key | Action |
 | --- | --- |
-| → / space, ← | next / previous attractor |
+| → or space | next attractor |
+| ← | previous attractor |
 | p | next palette |
 | r | random attractor and palette |
 | s | restart (watch the shape form) |
 | f | full screen |
-| q / esc | quit |
+| q or esc | quit |
 
 ## How it works
 
@@ -54,15 +68,15 @@ To just watch it in a window, open `build/Attractor Viewer.app`:
 - **Normalisation:** a short hidden warm-up measures each attractor's centre, size and typical
   speed, so all of them are framed and paced consistently without hand-tuned constants.
 - **Trails:** each frame, particles deposit anti-aliased line segments that follow their true
-  curved path into an HDR buffer that fades over time. Particle heads are drawn as crisp sprites
-  on top, followed by a subtle bloom, a soft tonemap and dithering.
+  curved path into an HDR buffer that fades over time. That buffer gets a subtle bloom, a soft
+  tonemap and dithering, and the particle heads are drawn on top as crisp sprites.
 - **Smoothness:** frames are driven by `CADisplayLink`, and new attractors are compiled and
-  warmed up on a background queue, so switching never drops a frame. Typical cost is about
-  2–2.5 ms of GPU time per frame on a 5K display (Apple M4).
+  warmed up on a background queue, so switching never drops a frame. On a base Apple M4 it costs roughly 2–3 ms of GPU
+  time per frame on a 6144×2592 display (the trail buffer is capped at 4K pixel count).
 
 ## Debugging
 
-Run the viewer from a terminal to see frame-pacing statistics:
+From the repo root, run the viewer from a terminal to see frame-pacing statistics:
 
 ```sh
 "build/Attractor Viewer.app/Contents/MacOS/AttractorViewer" --stats [--screen 1 --fullscreen]
@@ -76,12 +90,14 @@ frames and brightness jumps.
 - `Sources/Shared/Attractors.swift`: equations, camera angles, palettes.
 - `Sources/Shared/Renderer.swift`: particle look (`particleBrightness`, `headSize`,
   `lineWidth`, `flowSpeed`, `orbitSpeed`).
-- `build/attractor-render`: offline tool for still renders, camera-angle contact sheets and
-  GPU benchmarks:
+- `build/attractor-render`: offline tool for still renders, camera-angle contact sheets, videos
+  and GPU benchmarks (`--help` lists every option). Outputs go to the current directory, and
+  `--video` needs ffmpeg (`brew install ffmpeg`):
 
   ```sh
   build/attractor-render --attractor thomas --palette opal --out thomas.png
-  build/attractor-render --attractor arneodo --grow --skip 10 --seconds 20 --video demo.mp4
+  build/attractor-render --attractor arneodo --palette opal --grow --skip 10 --seconds 20 \
+      --size 1280x720 --crf 28 --video demo.mp4   # similar to the README demo
   build/attractor-render --attractor lorenz --sheet yaw --out angles.png
   build/attractor-render --attractor lorenz --size 2880x1800 --throughput
   ```

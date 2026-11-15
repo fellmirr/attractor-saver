@@ -57,9 +57,6 @@ func updateTitle() {
 func send(_ sel: String) {
     view.perform(NSSelectorFromString(sel))
     updateTitle()
-// Keep the title current when the saver cycles on its own.
-RunLoop.main.add(Timer(timeInterval: 1, repeats: true) { _ in MainActor.assumeIsolated { updateTitle() } },
-                 forMode: .common)
 }
 
 NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
@@ -90,6 +87,9 @@ window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
 view.startAnimation()
 updateTitle()
+// Keep the title current when the saver cycles on its own.
+RunLoop.main.add(Timer(timeInterval: 1, repeats: true) { _ in updateTitle() },
+                 forMode: .common)
 // ScreenSaverView.startAnimation() drives animateOneFrame itself, exactly as in the real screensaver.
 if nextEvery > 0 {
     RunLoop.main.add(Timer(timeInterval: nextEvery, repeats: true) { _ in send("showNextAttractor") }, forMode: .common)

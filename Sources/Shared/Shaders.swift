@@ -59,7 +59,7 @@ kernel void seedParticles(device Particle* ps [[buffer(0)]],
 
 // Each frame the integrator records TRAIL_SEGS+1 points along the true path, so the streak
 // drawn for this frame follows the curve instead of cutting a straight chord across it.
-#define TRAIL_SEGS 3
+#define TRAIL_SEGS TRAIL_SEGS_VALUE   // injected from AttractorRenderer.trailSegments
 
 kernel void stepParticles(device Particle* ps [[buffer(0)]],
                           constant Uniforms& u [[buffer(1)]],

@@ -2,7 +2,7 @@
 # Builds:
 #   build/Attractor.saver          the screensaver
 #   build/Attractor Viewer.app     a windowed viewer (embeds the saver)
-#   build/attractor-render         offline PNG/benchmark harness
+#   build/attractor-render         offline renders, contact sheets, videos and benchmarks
 # Usage: ./build.sh [install]   — "install" also copies the saver to ~/Library/Screen Savers
 set -euo pipefail
 cd "${0:A:h}"

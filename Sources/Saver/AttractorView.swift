@@ -177,6 +177,11 @@ final class AttractorSaverView: ScreenSaverView {
         guard !loading, let device else { return }
         loading = true
         pending = nil
+        // What's on screen now, to fall back to if this load fails.
+        let previous = renderer.map { r in
+            (Attractors.all.firstIndex { $0.name == r.attractor.name } ?? 0,
+             Palette.all.firstIndex { $0.name == r.palette.name } ?? 0)
+        }
         let att = Attractors.all[attractorIndex], pal = Palette.all[paletteIndex]
         let count = isPreview ? (1 << 14) : 49_152
         let (w, h) = pixelSize()
@@ -197,9 +202,24 @@ final class AttractorSaverView: ScreenSaverView {
                 guard let self else { return }
                 self.loading = false
                 self.pending = r
-                // A failed load mid-cycle would otherwise leave the screen dark: bring the
-                // current attractor back instead.
-                if r == nil, self.fadingOutSince != nil { self.fadeInFromNow() }
+                if r == nil {
+                    self.swapAsSoonAsReady = false
+                    if let (a, p) = previous {
+                        // Keep showing the current attractor (fading it back in if a cycle had
+                        // started) and keep the description truthful.
+                        self.attractorIndex = a
+                        self.paletteIndex = p
+                        if self.fadingOutSince != nil { self.fadeInFromNow() }
+                    } else {
+                        // Nothing on screen yet: try another attractor shortly.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                            guard let self, self.renderer == nil, !self.stopped else { return }
+                            self.choose(fresh: false)
+                            self.requestLoad(swapImmediately: true)
+                        }
+                    }
+                    return
+                }
                 // If the choice changed while this was loading, load again.
                 if let r, r.attractor.name != Attractors.all[self.attractorIndex].name
                     || r.palette.name != Palette.all[self.paletteIndex].name {
@@ -333,7 +353,7 @@ final class AttractorSaverView: ScreenSaverView {
             self.statsLock.lock()
             if self.lastPresented > 0 {
                 let iv = d.presentedTime - self.lastPresented
-                self.presentIntervals.append(iv)
+                if self.statsRequested { self.presentIntervals.append(iv) }
                 if self.debugTiming, iv > 0.025 {
                     print(String(format: "  slow present %.1f ms  loading=%d framesSinceSwap=%d", iv * 1000,
                                  phaseLoading ? 1 : 0, phaseSinceSwap))

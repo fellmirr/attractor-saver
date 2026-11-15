@@ -4,7 +4,7 @@ import Foundation
 import Metal
 
 enum LabelMaker {
-    /// Renders the attractor's name (letter-spaced small caps) and its equations
+    /// Renders the attractor's name (uppercase, letter-spaced) and its equations
     /// (small italic serif) into a premultiplied RGBA texture.
     /// Returns the texture and its size in pixels.
     static func make(device: MTLDevice, attractor: Attractor, screenHeight: Int,

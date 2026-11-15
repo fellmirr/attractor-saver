@@ -37,8 +37,8 @@ final class AttractorRenderer {
     /// with no visible difference (the black point hides the precision loss in faint tails).
     static let hdrFormat: MTLPixelFormat = .rg11b10Float
 
-    private(set) var attractor: Attractor
-    private(set) var palette: Palette
+    let attractor: Attractor
+    let palette: Palette
     private var seedPSO: MTLComputePipelineState!
     private var stepPSO: MTLComputePipelineState!
     private var linePSO: MTLRenderPipelineState!
@@ -107,15 +107,16 @@ final class AttractorRenderer {
         pathPoints = pb
         self.attractor = attractor
         self.palette = palette
-        try load(attractor: attractor, palette: palette)
+        try load()
     }
 
     // MARK: - Setup
 
-    func load(attractor: Attractor, palette: Palette) throws {
-        self.attractor = attractor
-        self.palette = palette
-        let src = shaderTemplate.replacingOccurrences(of: "DERIV_BODY", with: attractor.deriv)
+    /// Compiles this attractor's pipelines, then warms it up to measure its size and speed.
+    private func load() throws {
+        let src = shaderTemplate
+            .replacingOccurrences(of: "DERIV_BODY", with: attractor.deriv)
+            .replacingOccurrences(of: "TRAIL_SEGS_VALUE", with: String(Self.trailSegments))
         let opts = MTLCompileOptions()
         opts.mathMode = .fast
         let lib = try device.makeLibrary(source: src, options: opts)
@@ -157,10 +158,7 @@ final class AttractorRenderer {
         }
 
         prewarmAndNormalise()
-        clearAccum()
         pendingRestart = growFromCloud
-        needsCalibration = true
-        time = 0
     }
 
     private var needsCalibration = true
@@ -172,7 +170,7 @@ final class AttractorRenderer {
 
     private func baseUniforms() -> Uniforms {
         var u = Uniforms()
-        u.cam = SIMD4(0, Float(particleCount), attractor.spread, Float(frame))
+        u.cam = SIMD4(0, Float(particleCount), 0, Float(frame))
         u.seed = SIMD4(attractor.seed, 0)
         func lin(_ c: SIMD3<Float>) -> SIMD4<Float> { SIMD4(pow(c, SIMD3(repeating: 2.2)), 1) }
         u.pal0 = lin(palette.stops[0]); u.pal1 = lin(palette.stops[1]); u.pal2 = lin(palette.stops[2])
@@ -318,6 +316,9 @@ final class AttractorRenderer {
         configuredSize = nil
     }
 
+    /// Clears the trails (e.g. between contact-sheet cells in the harness).
+    func clearTrails() { clearAccum() }
+
     private func clearAccum() {
         guard let accum else { return }
         let cb = queue.makeCommandBuffer()!
@@ -388,7 +389,6 @@ final class AttractorRenderer {
         u.cam.x = dist
         lastMVP = mvp
         lastCamDist = dist
-        u.cam.w = Float(frame)
         u.misc = SIMD4(time, pow(attractor.decay, rate), 0, 1)
         u.extra.z = colorDrift
 
