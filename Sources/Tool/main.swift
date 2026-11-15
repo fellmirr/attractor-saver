@@ -1,8 +1,13 @@
-// attractor-render: offline harness for tuning cameras/looks and benchmarking.
+// attractor-render: offline harness for tuning cameras/looks, making videos and benchmarking.
 //
-//   attractor-render --attractor lorenz --out out.png [--size 1600x1000] [--particles 1048576]
-//                    [--palette ember] [--seconds 4] [--yaw 30 --pitch 10]
-//                    [--sheet yaw|pitch] [--bench]
+//   attractor-render --attractor lorenz[,thomas|all] --out out.png
+//       [--size 1600x1000] [--particles N] [--palette dusk] [--seconds 4]
+//       [--grow]                  start from a cloud (as the screensaver does) instead of settled
+//       [--yaw 30 --pitch 10]     fixed camera      [--sheet yaw|pitch]  contact sheet of angles
+//       [--zoom Z] [--decay D] [--head PX] [--bright B] [--bloom S] [--accumscale S] [--nolabel]
+//       [--video out.mp4 --skip S --crf 20]   record --seconds of video after skipping S seconds
+//       [--bench | --throughput]  GPU timing (per frame / at saturated clocks)
+//       [--nodraw] [--nosim]      profiling: skip trail drawing / simulation
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -16,12 +21,13 @@ do {
     while let a = it.next() {
         guard a.hasPrefix("--") else { continue }
         let k = String(a.dropFirst(2))
-        if ["bench", "nolabel", "points", "nodraw", "nosim", "throughput"].contains(k) { flags.insert(k) } else { args[k] = it.next() ?? "" }
+        if ["bench", "nolabel", "grow", "nodraw", "nosim", "throughput"].contains(k) { flags.insert(k) } else { args[k] = it.next() ?? "" }
     }
 }
 
 let device = MTLCreateSystemDefaultDevice()!
-let size = (args["size"] ?? "1600x1000").split(separator: "x").map { Int($0)! }
+let size = (args["size"] ?? "1600x1000").split(separator: "x").compactMap { Int($0) }
+guard size.count == 2, size[0] > 0, size[1] > 0 else { print("--size must look like 1600x1000"); exit(1) }
 let (W, H) = (size[0], size[1])
 let particleCount = Int(args["particles"] ?? "") ?? 49_152
 let paletteName = args["palette"] ?? "ember"
@@ -83,17 +89,17 @@ for name in names {
     guard var att = Attractors.named(name) else { print("unknown attractor \(name)"); exit(1) }
     if let z = args["zoom"].flatMap(Float.init) { att.zoom = z }
     if let d = args["decay"].flatMap(Float.init) { att.decay = d }
-    let out = names.count > 1 ? outBase.replacingOccurrences(of: ".png", with: "-\(att.name.lowercased().replacingOccurrences(of: "–", with: "-")).png") : outBase
+    let out: String = {
+        guard names.count > 1 else { return outBase }
+        let slug = Attractors.key(att.name).lowercased()
+        let base = (outBase as NSString).deletingPathExtension, ext = (outBase as NSString).pathExtension
+        return "\(base)-\(slug).\(ext.isEmpty ? "png" : ext)"
+    }()
     let t0 = Date()
+    // Without --grow, show the settled attractor: every particle warmed up, no restart.
     let r = try AttractorRenderer(device: device, outputFormat: .bgra8Unorm, particleCount: particleCount,
-                                  attractor: att, palette: palette)
+                                  attractor: att, palette: palette, growFromCloud: flags.contains("grow"))
     if let s = args["accumscale"].flatMap(Float.init) { r.accumScale = s }
-    r.usePoints = flags.contains("points")
-    if args["grow"] == nil {
-        // Show the settled attractor: warm up every particle, no restart from a cloud.
-        r.growFromCloud = false
-        try r.load(attractor: att, palette: palette)
-    }
     if let h = args["head"].flatMap(Float.init) { r.headSize = h }
     if let b = args["bright"].flatMap(Float.init) { r.particleBrightness = b }
     r.debugSkipDraw = flags.contains("nodraw")
@@ -133,6 +139,55 @@ for name in names {
     if let y = args["yaw"].flatMap(Float.init) { r.cameraOverride = (y, Float(args["pitch"] ?? "") ?? att.pitch) }
     let target = makeTarget(W, H)
 
+    if let videoPath = args["video"] {
+        // Render a video: skip `--skip` seconds (e.g. while the shape forms), then record
+        // `--seconds` at 60 fps, piping raw frames into ffmpeg. Fades in/out at the ends.
+        let skip = Float(args["skip"] ?? "") ?? 0
+        let aspect = Float(W) / Float(H)
+        r.resize(width: W, height: H)
+        r.calibrateIfNeeded(aspect: aspect)
+        if let (tex, lw, lh) = LabelMaker.make(device: device, attractor: r.attractor, screenHeight: H,
+                                               accent: r.palette.stops[3]) {
+            r.labelTexture = tex
+            r.labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: W, screenH: H)
+        }
+        for _ in 0..<Int(skip * 60) {
+            let cb = r.queue.makeCommandBuffer()!
+            r.encodeSimulation(cb, dt: 1 / 60, aspect: aspect)
+            cb.commit()
+        }
+        let ffmpeg = Process()
+        ffmpeg.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        ffmpeg.arguments = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgra",
+                            "-s", "\(W)x\(H)", "-r", "60", "-i", "-",
+                            "-c:v", "libx264", "-preset", "slow", "-crf", args["crf"] ?? "18",
+                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", videoPath]
+        let pipe = Pipe()
+        ffmpeg.standardInput = pipe
+        signal(SIGPIPE, SIG_IGN)   // report ffmpeg failures instead of dying on a broken pipe
+        do { try ffmpeg.run() } catch { print("could not start ffmpeg: \(error)"); exit(1) }
+        let total = Int(seconds * 60)
+        var bytes = [UInt8](repeating: 0, count: W * H * 4)
+        for i in 0..<total {
+            let t = Float(i) / 60
+            let f = max(0, min(1, t / 1.0, (seconds - t) / 1.0))
+            let fade = f * f * (3 - 2 * f)   // same smoothstep fade as the screensaver
+            let labelT = max(0, min(1, (t - 1.5) / 2))
+            r.labelAlpha = labelT * labelT * (3 - 2 * labelT)
+            let cb = r.queue.makeCommandBuffer()!
+            r.encodeSimulation(cb, dt: 1 / 60, aspect: aspect)
+            r.encodeComposite(cb, target: target, fade: fade)
+            cb.commit()
+            cb.waitUntilCompleted()
+            target.getBytes(&bytes, bytesPerRow: W * 4, from: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0)
+            pipe.fileHandleForWriting.write(Data(bytes))
+        }
+        try pipe.fileHandleForWriting.close()
+        ffmpeg.waitUntilExit()
+        guard ffmpeg.terminationStatus == 0 else { print("ffmpeg failed (\(ffmpeg.terminationStatus))"); exit(1) }
+        print("\(att.name): wrote \(total) frames -> \(videoPath)")
+        continue
+    }
     if flags.contains("throughput") {
         // Saturate the GPU (so clocks stay high and steady) and measure average cost per frame.
         render(r, target: target, frames: 30, label: true)

@@ -23,9 +23,8 @@ struct Attractor {
     // Camera
     var yaw: Float = 0          // degrees
     var pitch: Float = 15       // degrees
-    var sway: Float = 25        // degrees of slow yaw oscillation
     var pitchSway: Float = 6    // degrees of slow pitch oscillation
-    var spin: Float = 0         // degrees per second of continuous orbit
+    var spin: Float = 0         // orbit rate in degrees/second (0 = renderer's default orbit)
     var zoom: Float = 1.0
     var speed: Float = 1.0      // multiplier on the flow speed
     var exposure: Float = 1.0
@@ -40,7 +39,7 @@ enum Attractors {
             equations: ["ẋ = σ(y − x)", "ẏ = x(ρ − z) − y", "ż = xy − βz"],
             seed: [1, 1, 20], spread: 6, maxDt: 0.004, prewarmTime: 25,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 140, pitch: 5, sway: 25),
+            yaw: 140, pitch: 5),
         Attractor(
             name: "Aizawa",
             deriv: """
@@ -51,70 +50,70 @@ enum Attractors {
             equations: ["ẋ = (z − b)x − dy", "ẏ = dx + (z − b)y", "ż = c + az − z³/3 − (x² + y²)(1 + ez) + fzx³"],
             seed: [0.1, 0, 0], spread: 0.5, maxDt: 0.01, prewarmTime: 60,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 0, pitch: 18, sway: 0, pitchSway: 10, spin: 3),
+            yaw: 0, pitch: 18, pitchSway: 10, spin: 3),
         Attractor(
             name: "Halvorsen",
             deriv: "const float a=1.4; return float3(-a*p.x-4.0*p.y-4.0*p.z-p.y*p.y, -a*p.y-4.0*p.z-4.0*p.x-p.z*p.z, -a*p.z-4.0*p.x-4.0*p.y-p.x*p.x);",
             equations: ["ẋ = −ax − 4y − 4z − y²", "ẏ = −ay − 4z − 4x − z²", "ż = −az − 4x − 4y − x²"],
             seed: [-1.48, -1.51, 2.04], spread: 1, maxDt: 0.004, prewarmTime: 40,
             axes: (0, 1, 2), flip: [1, 1, 1], up: [1, 1, 1],
-            yaw: 0, pitch: 65, sway: 0, pitchSway: 12, spin: 3),
+            yaw: 0, pitch: 65, pitchSway: 12, spin: 3),
         Attractor(
             name: "Thomas",
             deriv: "const float b=0.208186; return float3(sin(p.y)-b*p.x, sin(p.z)-b*p.y, sin(p.x)-b*p.z);",
             equations: ["ẋ = sin y − bx", "ẏ = sin z − by", "ż = sin x − bz"],
             seed: [1, 0.5, 0], spread: 2, maxDt: 0.05, prewarmTime: 400,
             axes: (0, 1, 2), flip: [1, 1, 1], up: [1, 1, 1],
-            yaw: 0, pitch: 55, sway: 0, pitchSway: 25, spin: 2.5),
+            yaw: 0, pitch: 55, pitchSway: 25, spin: 2.5),
         Attractor(
             name: "Chen",
             deriv: "const float a=35.0, b=3.0, c=28.0; return float3(a*(p.y-p.x), (c-a)*p.x - p.x*p.z + c*p.y, p.x*p.y - b*p.z);",
             equations: ["ẋ = a(y − x)", "ẏ = (c − a)x − xz + cy", "ż = xy − bz"],
             seed: [-10, 0, 37], spread: 4, maxDt: 0.002, prewarmTime: 15,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 155, pitch: 5, sway: 25),
+            yaw: 155, pitch: 5),
         Attractor(
             name: "Dadras",
             deriv: "const float a=3.0, b=2.7, c=1.7, d=2.0, e=9.0; return float3(p.y - a*p.x + b*p.y*p.z, c*p.y - p.x*p.z + p.z, d*p.x*p.y - e*p.z);",
             equations: ["ẋ = y − ax + byz", "ẏ = cy − xz + z", "ż = dxy − ez"],
             seed: [1, 1, 0], spread: 1, maxDt: 0.005, prewarmTime: 60,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 120, pitch: 15, sway: 30, zoom: 0.85),
+            yaw: 120, pitch: 15, zoom: 0.85),
         Attractor(
             name: "Rössler",
             deriv: "const float a=0.2, b=0.2, c=5.7; return float3(-p.y-p.z, p.x+a*p.y, b+p.z*(p.x-c));",
             equations: ["ẋ = −y − z", "ẏ = x + ay", "ż = b + z(x − c)"],
             seed: [1, 1, 0], spread: 0.5, maxDt: 0.02, prewarmTime: 200,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 15, pitch: 25, sway: 30, exposure: 2.2),
+            yaw: 15, pitch: 25, exposure: 2.2),
         Attractor(
             name: "Four-Wing",
             deriv: "const float a=0.2, b=0.01, c=-0.4; return float3(a*p.x + p.y*p.z, b*p.x + c*p.y - p.x*p.z, -p.z - p.x*p.y);",
             equations: ["ẋ = ax + yz", "ẏ = bx + cy − xz", "ż = −z − xy"],
             seed: [1.3, -0.18, 0.01], spread: 0.5, maxDt: 0.01, prewarmTime: 150,
             axes: (0, 1, 2), flip: [1, 1, 1],
-            yaw: 0, pitch: 15, sway: 30, zoom: 0.85),
+            yaw: 0, pitch: 15, zoom: 0.85),
         Attractor(
             name: "Burke–Shaw",
             deriv: "const float s=10.0, v=4.272; return float3(-s*(p.x+p.y), -p.y - s*p.x*p.z, s*p.x*p.y + v);",
             equations: ["ẋ = −s(x + y)", "ẏ = −y − sxz", "ż = sxy + v"],
             seed: [0.6, 0, 0], spread: 0.2, maxDt: 0.003, prewarmTime: 40,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 75, pitch: 10, sway: 25),
+            yaw: 75, pitch: 10),
         Attractor(
             name: "Arneodo",
             deriv: "return float3(p.y, p.z, 5.5*p.x - 3.5*p.y - p.z - p.x*p.x*p.x);",
             equations: ["ẋ = y", "ẏ = z", "ż = −ax − by − z + dx³"],
             seed: [0.2, 0.2, 0], spread: 0.3, maxDt: 0.005, prewarmTime: 80,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 90, pitch: 15, sway: 30),
+            yaw: 90, pitch: 15),
         Attractor(
             name: "Rucklidge",
             deriv: "const float k=2.0, a=6.7; return float3(-k*p.x + a*p.y - p.y*p.z, p.x, -p.z + p.y*p.y);",
             equations: ["ẋ = −κx + λy − yz", "ẏ = x", "ż = −z + y²"],
             seed: [1, 0, 4.5], spread: 0.5, maxDt: 0.005, prewarmTime: 80,
             axes: (0, 2, 1), flip: [1, 1, 1],
-            yaw: 15, pitch: 10, sway: 20),
+            yaw: 15, pitch: 10),
     ]
 
     static func key(_ s: String) -> String {

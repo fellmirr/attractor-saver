@@ -7,8 +7,8 @@ using namespace metal;
 
 struct Uniforms {
     float4x4 mvp;
-    float4 sim;    // x: h, y: substeps, z: 1/medianSpeed, w: line intensity
-    float4 misc;   // x: time, y: decay, z: exposure, w: global fade
+    float4 sim;    // x: RK4 step h, y: RK4 steps this frame, z: 1/medianSpeed, w: line intensity
+    float4 misc;   // x: time, y: trail decay (sim pass), z: exposure (composite), w: global fade
     float4 cam;    // x: camera distance, y: particle count, z: seed spread, w: frame index
     float4 seed;   // xyz: seed point
     float4 pal[5];
@@ -21,7 +21,6 @@ struct Uniforms {
 
 struct Particle {
     float4 pos;   // xyz position, w: speed
-    float4 prev;  // xyz previous position
 };
 
 static inline float3 deriv(float3 p) {
@@ -56,7 +55,6 @@ kernel void seedParticles(device Particle* ps [[buffer(0)]],
                           uint id [[thread_position_in_grid]]) {
     float3 p = u.seed.xyz + u.cam.z * randGauss3(id + 12345u);
     ps[id].pos = float4(p, 0.0f);
-    ps[id].prev = float4(p, 0.0f);
 }
 
 // Each frame the integrator records TRAIL_SEGS+1 points along the true path, so the streak
@@ -68,7 +66,6 @@ kernel void stepParticles(device Particle* ps [[buffer(0)]],
                           device float4* path [[buffer(2)]],
                           uint id [[thread_position_in_grid]]) {
     float3 p = ps[id].pos.xyz;
-    float3 start = p;
     float h = u.sim.x;
     int n = int(u.sim.y);
     device float4* pts = path + id * (TRAIL_SEGS + 1);
@@ -88,10 +85,8 @@ kernel void stepParticles(device Particle* ps [[buffer(0)]],
         float3 q = ps[other].pos.xyz;
         if (any(isnan(q)) || any(isinf(q)) || length_squared(q) > 1e8f) q = u.seed.xyz;
         p = q + 1e-3f * randGauss3(id + uint(u.cam.w));
-        start = p;
         for (int seg = 0; seg <= TRAIL_SEGS; seg++) pts[seg] = float4(p, 0.0f);
     }
-    ps[id].prev = float4(start, 0.0f);
     ps[id].pos = float4(p, length(deriv(p)));
 }
 
@@ -155,18 +150,6 @@ struct PointOut {
     float size [[point_size]];
 };
 
-vertex PointOut pointVertex(uint vid [[vertex_id]],
-                            device const Particle* ps [[buffer(0)]],
-                            constant Uniforms& u [[buffer(1)]]) {
-    Particle P = ps[vid];
-    PointOut o;
-    o.position = u.mvp * float4(P.pos.xyz, 1.0f);
-    o.color = particleColor(u, P, vid, o.position.w);
-    o.size = 1.0f;
-    return o;
-}
-
-fragment half4 pointFragment(PointOut in [[stage_in]]) { return in.color; }
 
 // Particle heads: soft round sprites drawn straight onto the final image (after tonemapping),
 // so they stay crisp instead of smearing in the trail buffer. Size grows as they approach.

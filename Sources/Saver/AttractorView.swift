@@ -11,7 +11,8 @@ final class AttractorSaverView: ScreenSaverView {
     private static let fadeOutSeconds: Double = 2.0
     private static let fadeInSeconds: Double = 3.5
 
-    /// One shared pick per "session" so every display shows the same attractor.
+    /// Shared initial pick, so every display starts on the same attractor when the screensaver
+    /// starts (each display then cycles independently).
     private static var sharedPick: (attractor: Int, palette: Int, at: Date)?
 
     private var metalLayer: CAMetalLayer?
@@ -27,9 +28,8 @@ final class AttractorSaverView: ScreenSaverView {
     private var clock: CFTimeInterval = 0          // seconds of animation shown
     private var shownSince: CFTimeInterval = 0     // in `clock` time
     private var fadingOutSince: CFTimeInterval?
-    private var labelForHeight = 0
     private let inFlight = DispatchSemaphore(value: 2)
-    private var stopped = false
+    private var stopped = true          // until startAnimation
     private var willStopObserver: NSObjectProtocol?
 
     // Attractors are prepared off the main thread (shader compile, warm-up, calibration) and
@@ -39,7 +39,8 @@ final class AttractorSaverView: ScreenSaverView {
     private var pending: AttractorRenderer?
     private var swapAsSoonAsReady = false
 
-    // Frame pacing statistics (read by the viewer with --stats).
+    // Frame pacing statistics. Only collected when debugging (ATTRACTOR_DEBUG) or once the
+    // viewer has asked for them (--stats), so the real screensaver never accumulates them.
     private let statsLock = NSLock()
     private var lastPresented: CFTimeInterval = 0
     private var presentIntervals: [Double] = []
@@ -47,6 +48,7 @@ final class AttractorSaverView: ScreenSaverView {
     private var framesSinceSwap = 0
     private var lastFade: Float = 0
     private let debugTiming = ProcessInfo.processInfo.environment["ATTRACTOR_DEBUG"] != nil
+    private var statsRequested = false
 
     override init?(frame: NSRect, isPreview: Bool) {
         super.init(frame: frame, isPreview: isPreview)
@@ -55,9 +57,12 @@ final class AttractorSaverView: ScreenSaverView {
         wantsLayer = true
         // macOS 14+ keeps legacyScreenSaver alive after the screensaver is dismissed and
         // doesn't always call stopAnimation, so listen for the "will stop" broadcast too.
-        willStopObserver = DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name("com.apple.screensaver.willstop"), object: nil, queue: .main
-        ) { [weak self] _ in self?.halt() }
+        // (Not for the System Settings preview, which that broadcast doesn't concern.)
+        if !isPreview {
+            willStopObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.apple.screensaver.willstop"), object: nil, queue: .main
+            ) { [weak self] _ in self?.halt() }
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -102,6 +107,8 @@ final class AttractorSaverView: ScreenSaverView {
         if renderer == nil {
             choose(fresh: true)
             requestLoad(swapImmediately: true)
+        } else if pending != nil {
+            swapInPending()
         } else {
             fadeInFromNow()
         }
@@ -117,11 +124,12 @@ final class AttractorSaverView: ScreenSaverView {
         // A display link is bound to the window's screen; recreate it when that changes.
         link?.invalidate()
         link = nil
-        if !stopped { startLinkIfPossible() }
+        lastTarget = 0
+        startLinkIfPossible()
     }
 
     private func startLinkIfPossible() {
-        guard link == nil, window != nil else { return }
+        guard !stopped, link == nil, window != nil else { return }
         let l = displayLink(target: self, selector: #selector(tick(_:)))
         l.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         l.add(to: .main, forMode: .common)
@@ -189,6 +197,9 @@ final class AttractorSaverView: ScreenSaverView {
                 guard let self else { return }
                 self.loading = false
                 self.pending = r
+                // A failed load mid-cycle would otherwise leave the screen dark: bring the
+                // current attractor back instead.
+                if r == nil, self.fadingOutSince != nil { self.fadeInFromNow() }
                 // If the choice changed while this was loading, load again.
                 if let r, r.attractor.name != Attractors.all[self.attractorIndex].name
                     || r.palette.name != Palette.all[self.paletteIndex].name {
@@ -211,8 +222,8 @@ final class AttractorSaverView: ScreenSaverView {
                                                          screenHeight: h, accent: r.palette.stops[3]) {
             r.labelTexture = tex
             r.labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: w, screenH: h)
-            r.labelHeight = h
         }
+        r.configuredSize = (w, h)
     }
 
     /// Renders one throwaway frame so first-use costs (fresh GPU allocations, first pipeline use)
@@ -232,11 +243,11 @@ final class AttractorSaverView: ScreenSaverView {
         guard let p = pending else { return }
         pending = nil
         swapAsSoonAsReady = false
-        // Free the old renderer's GPU memory off the main thread.
-        if let old = renderer { Self.loadQueue.async { _ = old } }
+        let old = renderer
         renderer = p
+        // Free the old renderer's GPU memory off the main thread.
+        if let old { Self.loadQueue.async { withExtendedLifetime(old) {} } }
         framesSinceSwap = 0
-        labelForHeight = p.labelHeight
         fadeInFromNow()
     }
 
@@ -244,7 +255,7 @@ final class AttractorSaverView: ScreenSaverView {
 
     override func animateOneFrame() {
         // Fallback only: normally the display link drives frames.
-        if link == nil {
+        if !stopped, link == nil {
             startLinkIfPossible()
             if link == nil { renderFrame(dt: 1.0 / 60.0) }
         }
@@ -271,8 +282,11 @@ final class AttractorSaverView: ScreenSaverView {
         if layer.contentsScale != scale { layer.contentsScale = scale }
         if layer.drawableSize.width != CGFloat(w) || layer.drawableSize.height != CGFloat(h) {
             layer.drawableSize = CGSize(width: w, height: h)
-            if let renderer { Self.configure(renderer, width: w, height: h, preview: isPreview) }
-            labelForHeight = h
+        }
+        // (Re)configure when the size changed, after a stop released the GPU targets, or when a
+        // renderer prepared at an older size was swapped in.
+        if let r = renderer, r.configuredSize == nil || r.configuredSize! != (w, h) {
+            Self.configure(r, width: w, height: h, preview: isPreview)
         }
 
         // Cycle attractors with a fade through black. The next one starts loading as the fade
@@ -314,7 +328,7 @@ final class AttractorSaverView: ScreenSaverView {
         cb.addCompletedHandler { _ in sem.signal() }
         framesSinceSwap += 1
         let phaseLoading = loading, phaseSinceSwap = framesSinceSwap
-        drawable.addPresentedHandler { [weak self] d in
+        if debugTiming || statsRequested { drawable.addPresentedHandler { [weak self] d in
             guard let self, d.presentedTime > 0 else { return }
             self.statsLock.lock()
             if self.lastPresented > 0 {
@@ -327,7 +341,7 @@ final class AttractorSaverView: ScreenSaverView {
             }
             self.lastPresented = d.presentedTime
             self.statsLock.unlock()
-        }
+        } }
         cb.present(drawable)
         cb.commit()
     }
@@ -336,7 +350,9 @@ final class AttractorSaverView: ScreenSaverView {
 
     @objc func showNextAttractor() { jump(attractorBy: 1, paletteBy: Int.random(in: 1..<Palette.all.count)) }
     @objc func showPreviousAttractor() { jump(attractorBy: -1, paletteBy: Int.random(in: 1..<Palette.all.count)) }
-    @objc func restartAttractor() { renderer?.restartFromCloud(); fadeInFromNow() }
+    @objc func restartAttractor() {
+        if pending != nil { swapInPending() } else { renderer?.restartFromCloud(); fadeInFromNow() }
+    }
     @objc func showNextPalette() { jump(attractorBy: 0, paletteBy: 1) }
     @objc func showRandom() { choose(fresh: false); requestLoad(swapImmediately: true) }
 
@@ -354,11 +370,12 @@ final class AttractorSaverView: ScreenSaverView {
     /// Summary of presentation intervals since the last call: frames, hitches (> 1.5 refresh
     /// periods between presents), worst interval, ticks skipped because the GPU was busy.
     @objc var frameStats: String {
+        statsRequested = true
         statsLock.lock()
         let iv = presentIntervals
         presentIntervals.removeAll()
         statsLock.unlock()
-        let period = 1.0 / Double(window?.screen?.maximumFramesPerSecond ?? 60)
+        let period = 1.0 / 60.0   // the display link is capped at 60 fps
         let hitches = iv.filter { $0 > period * 1.5 }.count
         let worst = (iv.max() ?? 0) * 1000
         let s = String(format: "frames %d  hitches %d  worst %.1f ms  gpu-busy skips %d",

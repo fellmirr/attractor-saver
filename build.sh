@@ -7,11 +7,16 @@
 set -euo pipefail
 cd "${0:A:h}"
 
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "install" ) ]]; then
+  echo "usage: ./build.sh [install]" >&2
+  exit 1
+fi
+
 TARGET=arm64-apple-macos15.0
 FLAGS=(-O -target $TARGET -swift-version 5)
 SHARED=(Sources/Shared/*.swift)
 
-rm -rf build/Attractor.saver "build/Attractor Viewer.app"
+rm -rf build/Attractor.saver "build/Attractor Viewer.app" build/attractor-render
 mkdir -p build
 
 # --- Screensaver bundle

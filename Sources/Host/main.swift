@@ -4,7 +4,10 @@
 //   p           next palette          r   random attractor + palette
 //   s           restart (watch it form)   f   toggle full screen    q / esc   quit
 //
-// CLI: AttractorViewer [path/to/Attractor.saver] [--seconds N] [--size WxH] [--next-every S]
+// CLI: AttractorViewer [path/to/Attractor.saver] [--size WxH] [--screen N] [--fullscreen]
+//                      [--seconds N] [--next-every S] [--stats]
+// Env (read by the saver): ATTRACTOR_CYCLE=<seconds> per attractor, ATTRACTOR_DEBUG=1 logs slow
+// frames and brightness jumps.
 import AppKit
 import ScreenSaver
 
@@ -23,7 +26,8 @@ guard let path = candidates.first(where: { FileManager.default.fileExists(atPath
 }
 let seconds = Double(arg("--seconds") ?? "") ?? 0
 let nextEvery = Double(arg("--next-every") ?? "") ?? 0
-let size = (arg("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
+var size = (arg("--size") ?? "1440x900").split(separator: "x").compactMap { Double($0) }
+if size.count != 2 { size = [1440, 900] }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
@@ -53,6 +57,9 @@ func updateTitle() {
 func send(_ sel: String) {
     view.perform(NSSelectorFromString(sel))
     updateTitle()
+// Keep the title current when the saver cycles on its own.
+RunLoop.main.add(Timer(timeInterval: 1, repeats: true) { _ in MainActor.assumeIsolated { updateTitle() } },
+                 forMode: .common)
 }
 
 NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
@@ -65,7 +72,7 @@ NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
         case "p": send("showNextPalette")
         case "r": send("showRandom")
         case "s": send("restartAttractor")
-        case "f": window.toggleFullScreen(nil)
+        case "f": if !fullscreen { window.toggleFullScreen(nil) }
         case "q": app.terminate(nil)
         default: return e
         }

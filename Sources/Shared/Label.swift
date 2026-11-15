@@ -50,7 +50,8 @@ enum LabelMaker {
         let ruleGap = nameSize * 1.25
 
         let pad = 4 * unit
-        let w = Int((max(titleW + nameGap + subW, eqW) + 2 * pad).rounded(.up))
+        let contentW = max(titleW + nameGap + subW, eqW)
+        let w = Int((contentW + 2 * pad).rounded(.up))
         let h = Int((nameSize * 1.3 + ruleGap + CGFloat(eqs.count) * eqLead + 2 * pad).rounded(.up))
 
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -69,7 +70,7 @@ enum LabelMaker {
         // Thin rule between equations and name
         y += ruleGap * 0.1
         ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.18))
-        ctx.fill(CGRect(x: pad, y: y, width: max(titleW + nameGap + subW, eqW) * 0.18, height: max(1, unit)))
+        ctx.fill(CGRect(x: pad, y: y, width: contentW * 0.18, height: max(1, unit)))
         y += ruleGap * 0.9
         ctx.textPosition = CGPoint(x: pad, y: y)
         CTLineDraw(title, ctx)

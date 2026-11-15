@@ -3,6 +3,11 @@
 A macOS screensaver of strange attractors: tens of thousands of glowing particles tracing
 chaotic flows, simulated and drawn entirely on the GPU with Metal.
 
+<p align="center">
+  <a href="docs/demo.mp4"><img src="docs/demo-poster.jpg" width="100%" alt="Demo video: the Arneodo attractor condensing out of a cloud of particles"></a>
+  <br><sub><a href="docs/demo.mp4">▶ Watch the demo</a>: the Arneodo attractor condensing out of a cloud of particles (20 s)</sub>
+</p>
+
 <p>
   <img src="docs/halvorsen.jpg" width="49%" alt="Halvorsen attractor">
   <img src="docs/lorenz.jpg" width="49%" alt="Lorenz attractor">
@@ -55,6 +60,17 @@ To just watch it in a window, open `build/Attractor Viewer.app`:
   warmed up on a background queue, so switching never drops a frame. Typical cost is about
   2–2.5 ms of GPU time per frame on a 5K display (Apple M4).
 
+## Debugging
+
+Run the viewer from a terminal to see frame-pacing statistics:
+
+```sh
+"build/Attractor Viewer.app/Contents/MacOS/AttractorViewer" --stats [--screen 1 --fullscreen]
+```
+
+`ATTRACTOR_CYCLE=<seconds>` shortens the time per attractor, and `ATTRACTOR_DEBUG=1` logs slow
+frames and brightness jumps.
+
 ## Tinkering
 
 - `Sources/Shared/Attractors.swift`: equations, camera angles, palettes.
@@ -65,6 +81,7 @@ To just watch it in a window, open `build/Attractor Viewer.app`:
 
   ```sh
   build/attractor-render --attractor thomas --palette opal --out thomas.png
+  build/attractor-render --attractor arneodo --grow --skip 10 --seconds 20 --video demo.mp4
   build/attractor-render --attractor lorenz --sheet yaw --out angles.png
   build/attractor-render --attractor lorenz --size 2880x1800 --throughput
   ```

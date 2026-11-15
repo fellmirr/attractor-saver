@@ -31,23 +31,22 @@ final class AttractorRenderer {
     /// Intermediate points along each particle's path this frame (trailSegments + 1 per particle).
     let pathPoints: MTLBuffer
     static let trailSegments = 3
+    /// Bytes per particle: one float4 (xyz position, w speed).
+    static let particleStride = 16
     /// Trail/bloom buffers: packed 32-bit float colour. Half the memory traffic of rgba16Float
     /// with no visible difference (the black point hides the precision loss in faint tails).
     static let hdrFormat: MTLPixelFormat = .rg11b10Float
 
     private(set) var attractor: Attractor
     private(set) var palette: Palette
-    private var library: MTLLibrary?
     private var seedPSO: MTLComputePipelineState!
     private var stepPSO: MTLComputePipelineState!
     private var linePSO: MTLRenderPipelineState!
-    private var pointPSO: MTLRenderPipelineState!
     private var headPSO: MTLRenderPipelineState!
     /// Head sprite diameter in pixels at the attractor's centre depth (scaled per display).
     var headSize: Float = 3.2
     var headBrightness: Float = 0.9
-    /// Draw particles as 1px points (half the vertices) instead of motion-segment lines.
-    var usePoints = false
+    // Harness-only switches for profiling (attractor-render --nodraw / --nosim).
     var debugSkipDraw = false
     var debugSkipSim = false
     private var fadePSO: MTLRenderPipelineState!
@@ -60,7 +59,8 @@ final class AttractorRenderer {
     var labelTexture: MTLTexture?
     var labelRectNDC = SIMD4<Float>(repeating: 0)
     var labelAlpha: Float = 0
-    var labelHeight = 0
+    /// Output size the targets and label were last configured for.
+    var configuredSize: (width: Int, height: Int)?
 
     /// Fraction of the output resolution used for the particle accumulation buffer.
     var accumScale: Float = 1.0
@@ -73,8 +73,6 @@ final class AttractorRenderer {
     private var scale: Float = 1
     private var medianSpeed: Float = 1
     private var simTimePerFrame: Float = 0.01
-    private var substeps = 1
-    private var exposure: Float = 1
     private var lineIntensity: Float = 1
 
     var time: Float = 0
@@ -91,13 +89,14 @@ final class AttractorRenderer {
     var cameraOverride: (yaw: Float, pitch: Float)?
 
     init(device: MTLDevice, outputFormat: MTLPixelFormat, particleCount: Int,
-         attractor: Attractor, palette: Palette) throws {
+         attractor: Attractor, palette: Palette, growFromCloud: Bool = true) throws {
         self.device = device
         guard let q = device.makeCommandQueue() else { throw RendererError.setup("queue") }
         queue = q
         self.outputFormat = outputFormat
         self.particleCount = particleCount
-        guard let b = device.makeBuffer(length: particleCount * 32, options: .storageModePrivate) else {
+        self.growFromCloud = growFromCloud
+        guard let b = device.makeBuffer(length: particleCount * Self.particleStride, options: .storageModePrivate) else {
             throw RendererError.setup("particle buffer")
         }
         particles = b
@@ -120,7 +119,6 @@ final class AttractorRenderer {
         let opts = MTLCompileOptions()
         opts.mathMode = .fast
         let lib = try device.makeLibrary(source: src, options: opts)
-        library = lib
         func fn(_ n: String) throws -> MTLFunction {
             guard let f = lib.makeFunction(name: n) else { throw RendererError.setup("missing \(n)") }
             return f
@@ -143,11 +141,6 @@ final class AttractorRenderer {
             $0.sourceRGBBlendFactor = .one; $0.destinationRGBBlendFactor = .one
             $0.sourceAlphaBlendFactor = .one; $0.destinationAlphaBlendFactor = .one
         }
-        pointPSO = try pipe("pointVertex", "pointFragment", hdr) {
-            $0.rgbBlendOperation = .add; $0.alphaBlendOperation = .add
-            $0.sourceRGBBlendFactor = .one; $0.destinationRGBBlendFactor = .one
-            $0.sourceAlphaBlendFactor = .one; $0.destinationAlphaBlendFactor = .one
-        }
         headPSO = try pipe("headVertex", "headFragment", outputFormat) {
             $0.sourceRGBBlendFactor = .one; $0.destinationRGBBlendFactor = .one
             $0.sourceAlphaBlendFactor = .zero; $0.destinationAlphaBlendFactor = .one
@@ -166,17 +159,15 @@ final class AttractorRenderer {
         prewarmAndNormalise()
         clearAccum()
         pendingRestart = growFromCloud
-        exposure = 0 // recalibrated on first frames
-        needsExposureCalibration = true
+        needsCalibration = true
         time = 0
     }
 
-    private var needsExposureCalibration = true
+    private var needsCalibration = true
     private var pendingRestart = false
-    /// After calibrating on the settled attractor, restart from a random cloud so the viewer
-    /// sees the shape emerge.
-    var growFromCloud = true
-    var autoExposure = false
+    /// After calibrating, restart from a random cloud so the viewer sees the shape emerge.
+    /// When false (offline renders), every particle is warmed up and the settled shape is shown.
+    let growFromCloud: Bool
     var particleBrightness: Float = 0.42
 
     private func baseUniforms() -> Uniforms {
@@ -223,8 +214,6 @@ final class AttractorRenderer {
         sinceRestart = 0
     }
 
-    func cancelPendingRestart() { pendingRestart = false }
-
     /// Real seconds since particles were scattered; drives the time-lapse while the shape forms.
     private var sinceRestart: Float = 1000
     /// Simulation speed multiplier right after a restart, easing back to 1×.
@@ -240,6 +229,8 @@ final class AttractorRenderer {
         // When the shape will grow from a fresh cloud anyway, the warm-up only needs enough
         // particles to measure the attractor, so it stays light on the GPU.
         let warmCount = growFromCloud ? min(particleCount, 8192) : particleCount
+        // Diverging particles respawn next to another *warmed* particle, not a cold seed.
+        u.cam.y = Float(warmCount)
         // Submit one small chunk at a time and wait for it: this may run in the background
         // while another attractor is on screen, and must never hold up its frames.
         let chunk = 100
@@ -260,46 +251,48 @@ final class AttractorRenderer {
 
         // Read back a sample to find the attractor's centre, size and typical speed.
         // One bulk copy (tens of thousands of tiny copies would stall the GPU for a frame or two).
-        let readback = device.makeBuffer(length: particleCount * 32, options: .storageModeShared)!
+        let bytes = warmCount * Self.particleStride
+        let readback = device.makeBuffer(length: bytes, options: .storageModeShared)!
         let cb = queue.makeCommandBuffer()!
         let blit = cb.makeBlitCommandEncoder()!
-        blit.copy(from: particles, sourceOffset: 0, to: readback, destinationOffset: 0, size: particleCount * 32)
+        blit.copy(from: particles, sourceOffset: 0, to: readback, destinationOffset: 0, size: bytes)
         blit.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
 
         let sampleCount = min(warmCount, 65536)
         let stride = warmCount / sampleCount
-        let all = readback.contents().bindMemory(to: SIMD4<Float>.self, capacity: particleCount * 2)
+        let all = readback.contents().bindMemory(to: SIMD4<Float>.self, capacity: warmCount)
         var xs: [Float] = [], ys: [Float] = [], zs: [Float] = [], sp: [Float] = []
         xs.reserveCapacity(sampleCount); ys.reserveCapacity(sampleCount); zs.reserveCapacity(sampleCount)
         for i in 0..<sampleCount {
-            let p = all[i * stride * 2]
+            let p = all[i * stride]
             guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { continue }
             xs.append(p.x); ys.append(p.y); zs.append(p.z); sp.append(p.w)
         }
-        func pct(_ a: [Float], _ q: Float) -> Float {
-            let s = a.sorted(); return s.isEmpty ? 0 : s[min(s.count - 1, Int(Float(s.count) * q))]
+        // Percentiles of an already-sorted array.
+        func pct(_ s: [Float], _ q: Float) -> Float {
+            s.isEmpty ? 0 : s[min(s.count - 1, Int(Float(s.count) * q))]
         }
-        center = SIMD3(0.5 * (pct(xs, 0.005) + pct(xs, 0.995)),
-                       0.5 * (pct(ys, 0.005) + pct(ys, 0.995)),
-                       0.5 * (pct(zs, 0.005) + pct(zs, 0.995)))
+        let sx = xs.sorted(), sy = ys.sorted(), sz = zs.sorted()
+        center = SIMD3(0.5 * (pct(sx, 0.005) + pct(sx, 0.995)),
+                       0.5 * (pct(sy, 0.005) + pct(sy, 0.995)),
+                       0.5 * (pct(sz, 0.005) + pct(sz, 0.995)))
         var dists: [Float] = []
         dists.reserveCapacity(xs.count)
         for i in 0..<xs.count { dists.append(simd_length(SIMD3(xs[i], ys[i], zs[i]) - center)) }
-        let radius = max(pct(dists, 0.997), 1e-6)
+        let radius = max(pct(dists.sorted(), 0.997), 1e-6)
         scale = 1 / radius
-        medianSpeed = max(pct(sp, 0.5), 1e-6)
+        medianSpeed = max(pct(sp.sorted(), 0.5), 1e-6)
 
         // Choose simulated time per frame so the median particle moves at `flowSpeed`.
         let simPerSecond = flowSpeed * attractor.speed / (medianSpeed * scale)
         simTimePerFrame = simPerSecond / 60
-        substeps = max(1, Int((simTimePerFrame / attractor.maxDt).rounded(.up)))
     }
 
     var debugDescription: String {
-        String(format: "%@: center=(%.2f, %.2f, %.2f) radius=%.2f medSpeed=%.2f simT/frame=%.4f substeps=%d exposure=%.3f",
-               attractor.name, center.x, center.y, center.z, 1 / scale, medianSpeed, simTimePerFrame, substeps, exposure)
+        String(format: "%@: center=(%.2f, %.2f, %.2f) radius=%.2f medSpeed=%.2f simT/frame=%.4f",
+               attractor.name, center.x, center.y, center.z, 1 / scale, medianSpeed, simTimePerFrame)
     }
 
     // MARK: - Targets
@@ -316,12 +309,13 @@ final class AttractorRenderer {
         accum = tex(w, h)
         bloom = [tex(max(1, w / 2), max(1, h / 2)), tex(max(1, w / 4), max(1, h / 4)), tex(max(1, w / 8), max(1, h / 8))]
         clearAccum()
-        needsExposureCalibration = true
+        needsCalibration = true
     }
 
     func releaseTargets() {
         accum = nil
         bloom = []
+        configuredSize = nil
     }
 
     private func clearAccum() {
@@ -353,12 +347,8 @@ final class AttractorRenderer {
         let view = lookAt(eye: eye, target: .zero, up: SIMD3(0, 1, 0))
         let proj = perspective(fovY: fovY, aspect: aspect, near: 0.05, far: 50)
 
-        // Model: centre, scale, then map attractor axes to world axes.
-        var m = matrix_identity_float4x4
-        let ax = [a.axes.0, a.axes.1, a.axes.2]
+        // Model: centre, scale, then orient. `up` (if set) takes precedence over `axes`/`flip`.
         var orient = simd_float4x4(0)
-        for row in 0..<3 { orient[ax[row]][row] = a.flip[row] }
-        orient[3][3] = 1
         if let up = a.up {
             // Rotate so the attractor's `up` direction points along world Y.
             let y = simd_normalize(up)
@@ -367,8 +357,13 @@ final class AttractorRenderer {
             let z = simd_cross(x, y)
             // Rows of the rotation are the new basis vectors.
             orient = simd_float4x4(rows: [SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(0, 0, 0, 1)])
+        } else {
+            // Map attractor axes to world axes (world Y is up on screen).
+            let ax = [a.axes.0, a.axes.1, a.axes.2]
+            for row in 0..<3 { orient[ax[row]][row] = a.flip[row] }
+            orient[3][3] = 1
         }
-        m = orient * scaleMatrix(scale) * translate(-center)
+        let m = orient * scaleMatrix(scale) * translate(-center)
         return (proj * view * m, dist)
     }
 
@@ -394,7 +389,7 @@ final class AttractorRenderer {
         lastMVP = mvp
         lastCamDist = dist
         u.cam.w = Float(frame)
-        u.misc = SIMD4(time, pow(attractor.decay, rate), exposure, 1)
+        u.misc = SIMD4(time, pow(attractor.decay, rate), 0, 1)
         u.extra.z = colorDrift
 
         if !debugSkipSim {
@@ -414,15 +409,13 @@ final class AttractorRenderer {
         // Line width scales gently with resolution so it reads the same on any display.
         u.view = SIMD4(Float(accum.width), Float(accum.height),
                        lineWidth * 0.5 * max(1, Float(accum.height) / 1800), 0)
-        re.setRenderPipelineState(usePoints ? pointPSO : linePSO)
+        re.setRenderPipelineState(linePSO)
         re.setVertexBuffer(particles, offset: 0, index: 0)
         re.setVertexBuffer(pathPoints, offset: 0, index: 2)
         re.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         re.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
-        if debugSkipDraw {
-        } else if usePoints {
-            re.drawPrimitives(type: .point, vertexStart: 0, vertexCount: particleCount)
-        } else {
+        if !debugSkipDraw {
+            // Each trail segment is a 6-vertex quad.
             re.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: particleCount * 6 * Self.trailSegments)
         }
         re.endEncoding()
@@ -432,10 +425,9 @@ final class AttractorRenderer {
     func encodeComposite(_ cb: MTLCommandBuffer, target: MTLTexture, fade: Float) {
         guard let accum, bloom.count == 3 else { return }
         var u = baseUniforms()
-        u.misc = SIMD4(time, attractor.decay, exposure * attractor.exposure, fade)
+        u.misc = SIMD4(time, 0, attractor.exposure, fade)
         u.label = labelRectNDC
-        u.extra = SIMD4(labelAlpha, bloomStrength, 0, 0)
-        u.extra.z = colorDrift
+        u.extra = SIMD4(labelAlpha, bloomStrength, colorDrift, 0)
 
         var src = accum
         for dst in bloom {
@@ -484,60 +476,19 @@ final class AttractorRenderer {
         re.endEncoding()
     }
 
-    /// Runs ~1.5 s of frames offscreen and sets exposure from the brightness distribution,
-    /// so every attractor/palette/resolution/particle-count combination lands at a similar look.
+    /// Sets per-particle energy for the current target size and, the first time after a load,
+    /// restarts the particles from a cloud.
     func calibrateIfNeeded(aspect: Float) {
-        guard needsExposureCalibration, let accum else { return }
-        needsExposureCalibration = false
+        guard needsCalibration, let accum else { return }
+        needsCalibration = false
         // Fixed per-particle energy (scaled with resolution so streaks look the same on any
         // display): each particle reads as a distinct glowing streak, and only genuinely dense
         // regions build up into bright cores.
         lineIntensity = particleBrightness * sqrt(Float(accum.width * accum.height) / (2880 * 1800))
-        if autoExposure {
-            // Measure ~1.5 s of frames on the settled attractor and expose from that.
-            let savedTime = time
-            for _ in 0..<90 {
-                let cb = queue.makeCommandBuffer()!
-                encodeSimulation(cb, dt: 1 / 60, aspect: aspect)
-                cb.commit()
-            }
-            let p = luminancePercentile(0.99)
-            exposure = p > 0 ? 1.4 / p : 1
-            time = savedTime
-        } else {
-            exposure = 1
-        }
         if pendingRestart {
             pendingRestart = false
             restartFromCloud()
         }
-    }
-
-    private func luminancePercentile(_ q: Float) -> Float {
-        guard let accum, accum.pixelFormat == .rgba16Float else { return 0 }
-        let w = accum.width, h = accum.height
-        let rowBytes = w * 8
-        let buf = device.makeBuffer(length: rowBytes * h, options: .storageModeShared)!
-        let cb = queue.makeCommandBuffer()!
-        let blit = cb.makeBlitCommandEncoder()!
-        blit.copy(from: accum, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
-                  sourceSize: MTLSize(width: w, height: h, depth: 1), to: buf,
-                  destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: rowBytes * h)
-        blit.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        let px = buf.contents().bindMemory(to: Float16.self, capacity: w * h * 4)
-        var lums: [Float] = []
-        var i = 0
-        let stepPx = max(1, (w * h) / 200_000)
-        while i < w * h {
-            let l = 0.2126 * Float(px[i * 4]) + 0.7152 * Float(px[i * 4 + 1]) + 0.0722 * Float(px[i * 4 + 2])
-            if l > 1e-4 { lums.append(l) }
-            i += stepPx
-        }
-        guard !lums.isEmpty else { return 0 }
-        lums.sort()
-        return lums[min(lums.count - 1, Int(Float(lums.count) * q))]
     }
 }
 
