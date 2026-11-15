@@ -9,15 +9,18 @@ struct Attractor {
     let deriv: String
     /// Pretty equations for the on-screen label.
     let equations: [String]
+    /// Warm-up starts from a Gaussian cloud around `seed` with standard deviation `spread`.
     let seed: SIMD3<Float>
     let spread: Float
-    /// Largest stable RK4 step in the attractor's own time units.
+    /// Largest RK4 step used for on-screen frames, in the attractor's own time units.
+    /// (The hidden warm-up may use larger steps; see Renderer.prewarmAndNormalise.)
     let maxDt: Float
     /// Simulated time used to let particles settle onto the attractor and mix.
     let prewarmTime: Float
-    /// Maps attractor axes to world axes. World Y is up on screen.
-    /// Ignored when `up` is set.
+    /// Which attractor axis is shown along world x, y (up on screen) and z. E.g. (0, 2, 1) puts
+    /// the attractor's z axis up. Ignored when `up` is set.
     let axes: (Int, Int, Int)
+    /// Sign per world axis, applied after `axes`.
     var flip: SIMD3<Float> = [1, 1, 1]
     /// Optional: attractor-space direction to point up on screen (overrides axes).
     var up: SIMD3<Float>? = nil

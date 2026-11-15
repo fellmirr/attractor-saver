@@ -1,6 +1,7 @@
 // Metal source, compiled at runtime (no offline Metal toolchain needed).
 // `DERIV_BODY` is replaced by the attractor's ODE so each attractor gets a
-// specialised, branch-free integrator.
+// specialised, branch-free integrator; `TRAIL_SEGS_VALUE` by AttractorRenderer.trailSegments.
+// `struct Uniforms` must match the Swift struct in Renderer.swift.
 let shaderTemplate = #"""
 #include <metal_stdlib>
 using namespace metal;
@@ -9,7 +10,7 @@ struct Uniforms {
     float4x4 mvp;
     float4 sim;    // x: RK4 step h, y: RK4 steps this frame, z: 1/medianSpeed, w: line intensity
     float4 misc;   // x: time, y: trail decay (sim pass), z: exposure (composite), w: global fade
-    float4 cam;    // x: camera distance, y: particle count, z: seed spread, w: frame index
+    float4 cam;    // x: camera distance, y: respawn pool size (normally particle count), z: seed spread, w: frame index
     float4 seed;   // xyz: seed point
     float4 pal[5];
     float4 bg;     // rgb background (linear)
@@ -176,10 +177,10 @@ fragment half4 headFragment(PointOut in [[stage_in]], float2 pc [[point_coord]])
 
 static inline half4 particleColor(constant Uniforms& u, Particle P, uint pid, float clipW) {
 
-    // Colour by speed relative to the median, plus a little per-particle jitter.
+    // Colour by speed relative to the median.
     float s = P.pos.w * u.sim.z;
     float t = 0.42f * log2(max(s, 1e-4f)) + 0.32f;
-    // Wide per-particle spread so neighbouring particles read as individuals,
+    // A little per-particle jitter so neighbouring particles read as individuals,
     // plus a slow drift through the palette. Mirrored so it never jumps.
     t += (rand01(pid) - 0.5f) * 0.12f + u.misc.x * u.extra.z;
     t = 1.0f - abs(1.0f - fract(t * 0.5f) * 2.0f);

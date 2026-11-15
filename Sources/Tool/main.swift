@@ -7,9 +7,9 @@
 //       [--zoom Z] [--decay D] [--head PX] [--bright B] [--bloom S] [--accumscale S] [--nolabel]
 //       [--video out.mp4 --skip S --crf 18]   record --seconds of video after skipping S seconds
 //                                             (needs ffmpeg on PATH)
-//   attractor-render --help
 //       [--bench | --throughput]  GPU timing (per frame / at saturated clocks)
 //       [--nodraw] [--nosim]      profiling: skip trail drawing / simulation
+//   attractor-render --help
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -45,7 +45,7 @@ let device = MTLCreateSystemDefaultDevice()!
 let size = (args["size"] ?? "1600x1000").split(separator: "x").compactMap { Int($0) }
 guard size.count == 2, size[0] > 0, size[1] > 0 else { print("--size must look like 1600x1000"); exit(1) }
 let (W, H) = (size[0], size[1])
-let particleCount = Int(args["particles"] ?? "") ?? 49_152
+let particleCount = Int(args["particles"] ?? "") ?? AttractorRenderer.defaultParticleCount
 let paletteName = args["palette"] ?? "ember"
 guard let palette = Palette.all.first(where: { $0.name.lowercased() == paletteName.lowercased() }) else {
     print("unknown palette \(paletteName); choose from: \(Palette.all.map(\.name).joined(separator: ", "))")
@@ -82,16 +82,8 @@ func makeTarget(_ w: Int, _ h: Int) -> MTLTexture {
 
 func render(_ r: AttractorRenderer, target: MTLTexture, frames: Int, label: Bool) {
     let aspect = Float(target.width) / Float(target.height)
-    r.resize(width: target.width, height: target.height)
-    r.calibrateIfNeeded(aspect: aspect)
-    if label, let (tex, lw, lh) = LabelMaker.make(device: device, attractor: r.attractor,
-                                                   screenHeight: target.height, accent: r.palette.stops[3]) {
-        r.labelTexture = tex
-        r.labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: target.width, screenH: target.height)
-        r.labelAlpha = 1
-    } else {
-        r.labelAlpha = 0
-    }
+    r.configure(width: target.width, height: target.height, label: label)   // same setup as the saver
+    r.labelAlpha = label ? 1 : 0
     for i in 0..<frames {
         let cb = r.queue.makeCommandBuffer()!
         r.encodeSimulation(cb, dt: 1 / 60, aspect: aspect)
@@ -118,7 +110,8 @@ for name in names {
     // Without --grow, show the settled attractor: every particle warmed up, no restart.
     let r = try AttractorRenderer(device: device, outputFormat: .bgra8Unorm, particleCount: particleCount,
                                   attractor: att, palette: palette, growFromCloud: flags.contains("grow"))
-    if let s = args["accumscale"].flatMap(Float.init) { r.accumScale = s }
+    // Default: the saver's 4K cap on the trail buffer, so big-screen renders/benchmarks match it.
+    r.accumScaleOverride = args["accumscale"].flatMap(Float.init)
     if let h = args["head"].flatMap(Float.init) { r.headSize = h }
     if let b = args["bright"].flatMap(Float.init) { r.particleBrightness = b }
     r.debugSkipDraw = flags.contains("nodraw")
@@ -164,14 +157,7 @@ for name in names {
         // `--seconds` at 60 fps, piping raw frames into ffmpeg. Fades in/out at the ends.
         let skip = Float(args["skip"] ?? "") ?? 0
         let aspect = Float(W) / Float(H)
-        r.resize(width: W, height: H)
-        r.calibrateIfNeeded(aspect: aspect)
-        if !flags.contains("nolabel"),
-           let (tex, lw, lh) = LabelMaker.make(device: device, attractor: r.attractor, screenHeight: H,
-                                               accent: r.palette.stops[3]) {
-            r.labelTexture = tex
-            r.labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: W, screenH: H)
-        }
+        r.configure(width: W, height: H, label: !flags.contains("nolabel"))
         for _ in 0..<Int(skip * 60) {
             let cb = r.queue.makeCommandBuffer()!
             r.encodeSimulation(cb, dt: 1 / 60, aspect: aspect)
@@ -197,7 +183,7 @@ for name in names {
         for i in 0..<total {
             let t = Float(i) / 60
             let f = max(0, min(1, t / 1.0, (seconds - t) / 1.0))
-            let fade = f * f * (3 - 2 * f)   // same smoothstep fade as the screensaver
+            let fade = f * f * (3 - 2 * f)   // the saver's smoothstep curve, with shorter timings for clips
             let labelT = max(0, min(1, (t - 1.5) / 2))
             r.labelAlpha = labelT * labelT * (3 - 2 * labelT)
             let cb = r.queue.makeCommandBuffer()!

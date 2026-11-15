@@ -10,6 +10,9 @@ final class AttractorSaverView: ScreenSaverView {
         ProcessInfo.processInfo.environment["ATTRACTOR_CYCLE"].flatMap(Double.init) ?? 240
     private static let fadeOutSeconds: Double = 2.0
     private static let fadeInSeconds: Double = 3.5
+    /// The corner label fades in this long after an attractor appears, over `labelFadeSeconds`.
+    private static let labelDelaySeconds: Double = 2.5
+    private static let labelFadeSeconds: Double = 3
 
     /// Shared initial pick, so every display starts on the same attractor when the screensaver
     /// starts (each display then cycles independently).
@@ -104,11 +107,11 @@ final class AttractorSaverView: ScreenSaverView {
         stopped = false
         lastTarget = 0
         startLinkIfPossible()
-        if renderer == nil {
+        if pending != nil {
+            swapInPending()          // a load finished while we were stopped: use it
+        } else if renderer == nil {
             choose(fresh: true)
             requestLoad(swapImmediately: true)
-        } else if pending != nil {
-            swapInPending()
         } else {
             fadeInFromNow()
         }
@@ -140,7 +143,10 @@ final class AttractorSaverView: ScreenSaverView {
         stopped = true
         link?.invalidate()
         link = nil
+        // Free GPU targets while hidden (rebuilt on the next start), including a renderer that
+        // finished loading but was never shown.
         renderer?.releaseTargets()
+        pending?.releaseTargets()
     }
 
     private func fadeInFromNow() {
@@ -183,7 +189,7 @@ final class AttractorSaverView: ScreenSaverView {
              Palette.all.firstIndex { $0.name == r.palette.name } ?? 0)
         }
         let att = Attractors.all[attractorIndex], pal = Palette.all[paletteIndex]
-        let count = isPreview ? (1 << 14) : 49_152
+        let count = isPreview ? AttractorRenderer.previewParticleCount : AttractorRenderer.defaultParticleCount
         let (w, h) = pixelSize()
         let preview = isPreview
         Self.loadQueue.async { [weak self] in
@@ -202,6 +208,7 @@ final class AttractorSaverView: ScreenSaverView {
                 guard let self else { return }
                 self.loading = false
                 self.pending = r
+                if self.stopped { r?.releaseTargets() }   // finished after a stop: don't hold its targets
                 if r == nil {
                     self.swapAsSoonAsReady = false
                     if let (a, p) = previous {
@@ -233,17 +240,7 @@ final class AttractorSaverView: ScreenSaverView {
     /// Sizes targets, calibrates and builds the label. Safe to call off the main thread for a
     /// renderer that isn't on screen yet.
     private static func configure(_ r: AttractorRenderer, width w: Int, height h: Int, preview: Bool) {
-        // Keep the accumulation buffer at most ~4K worth of pixels on very large displays.
-        let maxPixels: Float = 3840 * 2160
-        r.accumScale = min(1, sqrt(maxPixels / Float(w * h)))
-        r.resize(width: w, height: h)
-        r.calibrateIfNeeded(aspect: Float(w) / Float(h))
-        if !preview, let (tex, lw, lh) = LabelMaker.make(device: r.device, attractor: r.attractor,
-                                                         screenHeight: h, accent: r.palette.stops[3]) {
-            r.labelTexture = tex
-            r.labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: w, screenH: h)
-        }
-        r.configuredSize = (w, h)
+        r.configure(width: w, height: h, label: !preview)
     }
 
     /// Renders one throwaway frame so first-use costs (fresh GPU allocations, first pipeline use)
@@ -274,11 +271,9 @@ final class AttractorSaverView: ScreenSaverView {
     // MARK: - Frame
 
     override func animateOneFrame() {
-        // Fallback only: normally the display link drives frames.
-        if !stopped, link == nil {
-            startLinkIfPossible()
-            if link == nil { renderFrame(dt: 1.0 / 60.0) }
-        }
+        // The display link drives frames; this only (re)creates it if it's missing. Without a
+        // window there's nothing visible to render, so there's deliberately no fallback render.
+        if !stopped, link == nil { startLinkIfPossible() }
     }
 
     @objc private func tick(_ l: CADisplayLink) {
@@ -333,7 +328,7 @@ final class AttractorSaverView: ScreenSaverView {
 
         guard let renderer else { return }
         // Label drifts in a little after the attractor appears.
-        let labelT = Float(max(0, min(1, (clock - shownSince - 2.5) / 3)))
+        let labelT = Float(max(0, min(1, (clock - shownSince - Self.labelDelaySeconds) / Self.labelFadeSeconds)))
         renderer.labelAlpha = isPreview ? 0 : labelT * labelT * (3 - 2 * labelT)
 
         // Never queue more than two frames on the GPU; skip a tick instead of blocking.

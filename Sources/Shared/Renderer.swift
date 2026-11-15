@@ -2,6 +2,8 @@ import Foundation
 import Metal
 import simd
 
+/// Must match `struct Uniforms` in Shaders.swift field for field (same order, float4-aligned;
+/// pal0…pal4 correspond to the shader's `pal[5]`).
 struct Uniforms {
     var mvp = matrix_identity_float4x4
     var sim = SIMD4<Float>(repeating: 0)
@@ -31,6 +33,14 @@ final class AttractorRenderer {
     /// Intermediate points along each particle's path this frame (trailSegments + 1 per particle).
     let pathPoints: MTLBuffer
     static let trailSegments = 3
+    /// Particles in the full-screen saver (and the tool's default) and in the Settings preview.
+    static let defaultParticleCount = 49_152
+    static let previewParticleCount = 1 << 14
+    /// The trail buffer is kept at most ~4K worth of pixels on very large displays.
+    static let maxAccumPixels: Float = 3840 * 2160
+    /// Reference display the line width, head size and particle energy are tuned for.
+    static let referenceHeight: Float = 1800
+    static let referencePixels: Float = 2880 * 1800
     /// Bytes per particle: one float4 (xyz position, w speed).
     static let particleStride = 16
     /// Trail/bloom buffers: packed 32-bit float colour. Half the memory traffic of rgba16Float
@@ -43,6 +53,9 @@ final class AttractorRenderer {
     private var stepPSO: MTLComputePipelineState!
     private var linePSO: MTLRenderPipelineState!
     private var headPSO: MTLRenderPipelineState!
+    // MARK: Look (tunables; see README "Tinkering")
+    /// Energy each trail segment deposits (at the reference resolution).
+    var particleBrightness: Float = 0.42
     /// Head sprite diameter in pixels at the attractor's centre depth (scaled per display).
     var headSize: Float = 3.2
     var headBrightness: Float = 0.9
@@ -62,8 +75,10 @@ final class AttractorRenderer {
     /// Output size the targets and label were last configured for.
     var configuredSize: (width: Int, height: Int)?
 
-    /// Fraction of the output resolution used for the particle accumulation buffer.
-    var accumScale: Float = 1.0
+    /// Fraction of the output resolution used for the trail buffer. Set by `configure`, from
+    /// `accumScaleOverride` if given, else from the 4K cap.
+    private(set) var accumScale: Float = 1.0
+    var accumScaleOverride: Float?
     /// Palette positions per second that colours slowly drift through.
     var colorDrift: Float = 0.005
     var bloomStrength: Float = 0.12
@@ -166,12 +181,12 @@ final class AttractorRenderer {
     /// After calibrating, restart from a random cloud so the viewer sees the shape emerge.
     /// When false (offline renders), every particle is warmed up and the settled shape is shown.
     let growFromCloud: Bool
-    var particleBrightness: Float = 0.42
 
     private func baseUniforms() -> Uniforms {
         var u = Uniforms()
         u.cam = SIMD4(0, Float(particleCount), 0, Float(frame))
         u.seed = SIMD4(attractor.seed, 0)
+        // sRGB-ish palette -> linear (gamma 2.2; the composite shader re-encodes with 1/2.2).
         func lin(_ c: SIMD3<Float>) -> SIMD4<Float> { SIMD4(pow(c, SIMD3(repeating: 2.2)), 1) }
         u.pal0 = lin(palette.stops[0]); u.pal1 = lin(palette.stops[1]); u.pal2 = lin(palette.stops[2])
         u.pal3 = lin(palette.stops[3]); u.pal4 = lin(palette.stops[4])
@@ -220,7 +235,8 @@ final class AttractorRenderer {
     private func prewarmAndNormalise() {
         var u = baseUniforms()
         seed(at: attractor.seed, spread: attractor.spread)
-        // Integrate for prewarmTime, capped at a fixed step budget.
+        // Integrate for prewarmTime in at most 6000 steps. For long warm-ups this means steps larger
+        // than `maxDt`; the few particles that diverge simply respawn, and only statistics are kept.
         let maxSteps = 6000
         let steps = min(maxSteps, Int((attractor.prewarmTime / attractor.maxDt).rounded(.up)))
         let h = attractor.prewarmTime / Float(steps)
@@ -294,6 +310,23 @@ final class AttractorRenderer {
     }
 
     // MARK: - Targets
+
+    /// Sizes the trail buffers for a `width`×`height` output, sets the per-particle energy,
+    /// triggers the initial restart if pending, and builds the corner label. Used by the
+    /// screensaver and the offline tool alike, so renders match what the screensaver shows.
+    func configure(width w: Int, height h: Int, label: Bool) {
+        accumScale = accumScaleOverride ?? min(1, sqrt(Self.maxAccumPixels / Float(w * h)))
+        resize(width: w, height: h)
+        calibrateIfNeeded()
+        if label, let (tex, lw, lh) = LabelMaker.make(device: device, attractor: attractor,
+                                                      screenHeight: h, accent: palette.stops[3]) {
+            labelTexture = tex
+            labelRectNDC = LabelMaker.rect(w: lw, h: lh, screenW: w, screenH: h)
+        } else if !label {
+            labelTexture = nil
+        }
+        configuredSize = (w, h)
+    }
 
     func resize(width: Int, height: Int) {
         let w = max(1, Int(Float(width) * accumScale)), h = max(1, Int(Float(height) * accumScale))
@@ -406,9 +439,10 @@ final class AttractorRenderer {
         re.setRenderPipelineState(fadePSO)
         re.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         re.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        // Line width scales gently with resolution so it reads the same on any display.
+        // Line width grows linearly with resolution above the reference height (never thinner
+        // than lineWidth), so lines read the same on any display.
         u.view = SIMD4(Float(accum.width), Float(accum.height),
-                       lineWidth * 0.5 * max(1, Float(accum.height) / 1800), 0)
+                       lineWidth * 0.5 * max(1, Float(accum.height) / Self.referenceHeight), 0)
         re.setRenderPipelineState(linePSO)
         re.setVertexBuffer(particles, offset: 0, index: 0)
         re.setVertexBuffer(pathPoints, offset: 0, index: 2)
@@ -459,7 +493,7 @@ final class AttractorRenderer {
             hu.mvp = lastMVP
             hu.cam.x = lastCamDist
             hu.sim.w = lineIntensity
-            let pxScale = Float(target.height) / 1800
+            let pxScale = Float(target.height) / Self.referenceHeight   // heads may shrink below it
             hu.head = SIMD4(headSize * pxScale, headBrightness, 0, 0)
             re.setRenderPipelineState(headPSO)
             re.setVertexBuffer(particles, offset: 0, index: 0)
@@ -476,15 +510,15 @@ final class AttractorRenderer {
         re.endEncoding()
     }
 
-    /// Sets per-particle energy for the current target size and, the first time after a load,
-    /// restarts the particles from a cloud.
-    func calibrateIfNeeded(aspect: Float) {
+    /// Sets per-particle energy for the current trail-buffer size and, the first time after a
+    /// load, restarts the particles from a cloud. (`particleBrightness` is only read here.)
+    private func calibrateIfNeeded() {
         guard needsCalibration, let accum else { return }
         needsCalibration = false
         // Fixed per-particle energy (scaled with resolution so streaks look the same on any
         // display): each particle reads as a distinct glowing streak, and only genuinely dense
         // regions build up into bright cores.
-        lineIntensity = particleBrightness * sqrt(Float(accum.width * accum.height) / (2880 * 1800))
+        lineIntensity = particleBrightness * sqrt(Float(accum.width * accum.height) / Self.referencePixels)
         if pendingRestart {
             pendingRestart = false
             restartFromCloud()
