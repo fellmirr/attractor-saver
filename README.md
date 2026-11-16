@@ -6,7 +6,7 @@ chaotic flows, simulated and drawn entirely on the GPU with Metal.
 <p align="center">
   <img src="docs/demo.webp" width="100%" alt="Animation: the Arneodo attractor condensing out of a cloud of particles">
   <br><sub>The Arneodo attractor condensing out of a cloud of particles.
-  <a href="docs/demo.mp4">Full-quality video</a> (MP4, 8 MB).</sub>
+  <a href="https://github.com/fellmirr/attractor-saver/releases/download/v1.0/attractor-demo-1080p60.mp4">Full-quality video</a> (1080p60 MP4, 73 MB).</sub>
 </p>
 
 <p>
