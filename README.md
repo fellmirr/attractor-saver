@@ -4,8 +4,9 @@ A macOS screensaver of strange attractors: tens of thousands of glowing particle
 chaotic flows, simulated and drawn entirely on the GPU with Metal.
 
 <p align="center">
-  <a href="docs/demo.mp4"><img src="docs/demo-poster.jpg" width="100%" alt="Demo video: the Arneodo attractor condensing out of a cloud of particles"></a>
-  <br><sub><a href="docs/demo.mp4">▶ Watch the demo</a> (MP4, 8 MB): the Arneodo attractor condensing out of a cloud of particles</sub>
+  <img src="docs/demo.webp" width="100%" alt="Animation: the Arneodo attractor condensing out of a cloud of particles">
+  <br><sub>The Arneodo attractor condensing out of a cloud of particles.
+  <a href="docs/demo.mp4">Full-quality video</a> (MP4, 8 MB).</sub>
 </p>
 
 <p>
